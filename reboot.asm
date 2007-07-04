@@ -269,6 +269,8 @@ countBar:	; wait N seconds (destroys AX CX DX=
 	call getTicks
 	add ax,18	; 1 second
 	mov dx,ax
+	sti		; some int 13, 15, 16, 21 or 2f "flush" call can have
+			; accidentally disabled interrupts :-( (fix 1/2007)
 countWaiting:		; we do NOT call int 28h / idling while waiting!
 	call getTicks
 	cmp ax,dx

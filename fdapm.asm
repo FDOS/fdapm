@@ -49,6 +49,9 @@ IdleStrategy	db 15	; default "all 4 strategies". Possible
 IdleHardness	dw 8	; "max" (if below 7, int 28h idling disabled)
 			; 1..5 is ADV:MIN, 6 ADV:REG, 7..8 ADV:MAX
 APMPollFreq	dw 0	; "APM polling frequency" (usually 0)
+
+maxSavingstrat	db 3	; mask to define maximum allowed savingstrat
+
 eofTSR		db "*** *** *** ***"	; TSR ends here.
 
 ; ---------------
@@ -60,6 +63,13 @@ eofTSR		db "*** *** *** ***"	; TSR ends here.
 ; FUTURE extension: removetsr - call to remove existing TSR
 
 %include "hooktsr.asm"
+
+; ---------------
+
+; Contains: DPMS related functions for EGA, VGA and VBE graphics.
+; Functions: dodpms, findEga, findVga, vbeSet
+
+%include "dpmsfunc.asm"
 
 ; ---------------
 
@@ -159,6 +169,8 @@ quitProg:
 ; Call with speed selection AX (0 frozen to S1 ... 8 max)
 ; Contains: acpioff (never returns, just puts system to S5 soft-off)
 ; Call after appropriate "flush disk caches" functions!
+
+acpistuff:	; label: non-acpi can overwrite things after this point
 
 %include "acpitool.asm"
 

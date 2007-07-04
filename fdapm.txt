@@ -1,5 +1,5 @@
 ### This file is part of FDAPM, a tool for APM power management and
-### energy saving. (c) by Eric Auer <eric@coli.uni-sb.de> 2003-2005.
+### energy saving. (c) by Eric Auer <eric@coli.uni-sb.de> 2003-2007.
 
 FDAPM is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published
@@ -38,6 +38,7 @@ APMDOS ->   between the hookhandler call and the going TSR code,
             whether to use APM CPU IDLE)...
             This should give you maximum energy savings. It is the
             only mode that causes FDAPM to stay resident in RAM.
+
             MS POWER syntax compatibility aliases: "ADV" and
             "ADV:MIN", "ADV:REG" and "ADV:MAX", with the special
             property that only "ADV:MAX" (and "APMDOS") enables
@@ -137,9 +138,20 @@ ACPIOFF ->  (new 2/2005) As POWEROFF but explicitly uses ACPI instead
             if no APM BIOS support is present (new 2/2005, too). The
             system is placed into S5 soft-off after flushing caches and
             spinning down disks. Useful to compare APM / ACPI handling.
+            New 1/2007 is support for systems with dual ACPI PM I/O
+            port banks and BIOS/ACPI data at e000:???? in memory.
 
 SPEEDn ->   (new 2/2005) Read ACPI tables and set system speed to n *
             12.5% of maximum speed. Use SPEED9 to show current setting.
+            SPEED9 is the recommended way to test if your system does
+            use ACPI in a FDAPM compatible way. If your DOS is crashed
+            by FDAPM SPEED9, you should make sure that int 15.87 works.
+
+            Things which can block int 15.87 are the FD EMM386 default
+            NOCHECK setting, the JEMM386 explicit NOCHECK setting, and
+            some versions of HIMEM - unless "repaired" by loading any
+            version of EMM386 afterwards :-). If you use FD EMM386 or
+            JEMM386 (www.japheth.de), try the MEMCHECK option.
 
 SPEED0 ->   Speed 0 will put the system into S1 standby (press the ATX
             power or sleep button to continue) CPU-wise. None of the
@@ -177,7 +189,8 @@ in config.sys). Introduced 27 Nov 2003. Older FDAPM versions just
 display the help screen if no command line options are given.
 
 
-... and this is the TODO LIST / bug list ...
+... and this is the TODO LIST ...
+
 
 handlers.asm some POWER API "set" functions are only dummies, you
              may want to change that.
@@ -194,6 +207,10 @@ UNIDLECHECK  if you want to define this (activate it at compile
 UNLOAD       add a way to remove FDAPM from memory (no need to be
              compatible to MS POWER - you cannot remove that one).
 
+
+... last but not least, this is the KNOWN COMPATIBILITY RISK LIST ...
+
+
 APM BIOSes   Some APM BIOSes have bugs like spinning up the disks
              at the moment when they cut power or not being able
              to enter sleep / standby mode properly. Hints for
@@ -207,6 +224,20 @@ Connect bug  If your software fails to DISconnect from the protected
 QEMM         Some EMM386 drivers like some QEMM versions do not allow
              DOS to halt the CPU. In that case, APMDOS mode has little
              or no energy saving effect.
+
+EMM386       Some EMM386 drivers only allow int 15.87 access to normal
+             memory. The ACPI tables, however, are not "normal" - for
+             some computers, they are at the end of the 4 GB address
+             space (some EMM386 always allow access there, as VGA RAM
+             framebuffers etc are in that area, too), but for other
+             computers, the tables are at the end of your real RAM,
+             yet (of course) excluded from use for EMS / XMS / other.
+
+HIMEM        Some versions of HIMEM have broken int 15.87 wrappers to
+             manage A20 state during access to RAM outside the first
+             1 MB. If FDAPM ACPI functions fail, add EMM386 (which
+             will override the HIMEM int 15 handler) or use another
+             version of HIMEM or try without HIMEM loaded at all.
 
 SSHDOS       The DOS SSH client (compiled with DJGPP) never seems to
              be idle enough for APMDOS. Let me know your ideas about

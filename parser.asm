@@ -1,5 +1,5 @@
 ; ### This file is part of FDAPM, a tool for APM power management and
-; ### energy saving. (c) by Eric Auer <eric@coli.uni-sb.de> 2003-2005.
+; ### energy saving. (c) by Eric Auer <eric@coli.uni-sb.de> 2003-2007.
 ; FDAPM is free software; you can redistribute it and/or modify it
 ; under the terms of the GNU General Public License as published
 ; by the Free Software Foundation; either version 2 of the License,
@@ -30,7 +30,11 @@ parseOptions:	; parse command line and call functions as needed.
 	cld
 	mov si,81h	; command line buffer (ignore length byte)
 lpCase:	mov al,[si]
-	cmp al,'a'
+	cmp al,9	; TAB
+	jnz noTab
+	mov al,' '	; turn tab into space
+	mov [si],al
+noTab:	cmp al,'a'
 	jb okCase
 	cmp al,'z'
 	ja okCase
@@ -44,10 +48,15 @@ okCase:	inc si
 fullCL:	mov al,0
 	dec si		; rewind the inc si
 	mov [si],al	; NUL terminate command line
+	cmp si,81h	; do not eat more than whole string :-p
+	jz noTrail
+	cmp byte [si-1],' '	; eat trailing space: "fdapm keyword > file"
+	jz fullCL	; note that we already turned tab to space above
+noTrail:
 	mov [0ffh],al
 	;
 	mov si,81h	; command line buffer (ignore length byte)
-preSkip:
+preSkip:		; skip over leading space, slashes, dashes
 	lodsb
 	cmp al,'-'
 	jz preSkip
@@ -57,10 +66,10 @@ preSkip:
 	jz preSkip
 	cmp al,'?'	; treat "?" as help request
 	jz thaHelp
-	cmp al,9	; TAB
-	jz preSkip
+;	cmp al,9	; TAB
+;	jz preSkip
 	cmp al,13	; CR, NUL, etc.
-	ja anyWord
+	ja anyWord	; ... else line only contains non-content chars
 
 noWord:			; reached at end of command line. Old style
 			; was: show help if no command found.
@@ -289,8 +298,8 @@ wxOffNoPOWER:
 	; Currently, my answer to this question is NO.
 wxBios:	call connectAPM
 	jc wxBiosNoAPM
-	mov ax,5305h	; CPU IDLE (until next IRQ)
-	int 15h
+; -	mov ax,5305h	; CPU IDLE (until next IRQ)
+; -	int 15h
 	call enableAPM
 	jmp short wxBiosAPM
 wxBiosNoAPM:
@@ -336,8 +345,8 @@ zapconfirm:
 	; Currently, my answer to this question is NO.
 wxDos:	call connectAPM
 	jc wxDosNoAPM
-	mov ax,5305h	; CPU IDLE (until next IRQ)
-	int 15h
+; -	mov ax,5305h	; CPU IDLE (until next IRQ)
+; -	int 15h
 	call enableAPM
 	jmp short wxDosAPM
 wxDosNoAPM:
@@ -388,6 +397,11 @@ wxSusp:
 	mov ax,4	; suspend
 	call shutDownHandler
 	jmp short wxNorm
+
+	; fetch ACPI tables and print the data, for debugging (6/2007)
+wxACPIInfo:
+	call acpidump	; print hex dump of all ACPI tables while reading
+	ret
 
 	; spin-down and power off, explicitly using ACPI (2/2005)
 wxACPIOff:
@@ -447,90 +461,21 @@ wxCold:
 
 	; TURN ON VGA SIGNAL
 wxVgaOn:
-	mov ax,0x1200	; ENABLE refresh
-	jmp short wxVga
+	mov ax,0	; ENABLE refresh, set screen to on
+	jmp short wxVga	; control refresh via EGA / VGA / VBE
 
 	; TURN OFF VGA SIGNAL / SCREEN
 wxVgaOff:
-	mov ax,0x1201	; DISABLE refresh
+	mov ax,1	; DISABLE refresh, set screen to off/suspend
 wxVga:	call findEga	; preserves AX, tests for VGA, sets CY if not found
-	jnc wxVga2
-	mov dx,needvgamsg
+	jc wxNVga
+	call dodpms	; control refresh via EGA / VGA / VBE
+	ret
+wxNVga:	mov dx,needegamsg	; abort if not at least EGA
 	mov ah,9
 	int 21h
 	stc
 	ret
-wxVga2:	call findVga
-	mov bx,ax	; to remember the on/off decision
-	jc wxVga3	; skip if not VGA
-	mov bl,0x36
-	push ax
-	int 0x10	; INT 10.12.BL=36 VGA refresh control
-	; returns AL=12 if function supported, but the user will
-	; notice anyway... (whole screen will show DAC[0] color)
-	pop bx		; BL is used to remember the on/off decision
-wxVga3:	; int 10.1012.bl=36 was VGA only, everything else works on EGA+
-	mov dx,0x3c4
-	mov al,1	; EGA/VGA sequencer: clocking
-	out dx,al
-	inc dx
-	in al,dx
-	and al,0xd0	; VGA screen refresh on
-	cmp bl,0	; 0 means "enable"
-	jz wxVgaOn1	; if enabled, skip "refresh off"
-	or al,0x20	; VGA screen refresh off
-wxVgaOn1:
-	out dx,al
-	;
-	push ds
-	mov ax,0x40
-	mov ds,ax
-	mov dx,[ds:0x63]	; CRT controller base I/O port address
-	pop ds		; (3b4 for mono, but usually 3d4 for color)
-	;
-	mov al,0x17	; EGA/VGA: mode control
-	out dx,al
-	inc dx
-	in al,dx
-	and al,0x7f	; reset/stop CRTC
-	cmp bl,1	; 1 means "disable"
-	jz wxVgaOff1	; if disabled, stay in stop mode
-	or al,0x80	; CRTC resume from stop
-wxVgaOff1:
-	out dx,al
-	ret
-
-findVga:		; check if VGA is present, set CY otherwise (5/2005)
-	call findEga
-	jc noVga
-	push ax
-	push bx
-	mov ax,0x1a00	; get VGA display combo BX / "install check"
-	int 0x10
-	cmp al,0x1a	; confirmation received? then VGA found.
-	pop bx
-	pop ax
-	stc
-	jnz noVga
-isVga:	clc
-noVga:	ret
-
-findEga:		; check if EGA is present, set CY otherwise (5/2005)
-	push ax
-	push bx
-	push cx
-	mov ah,0x12
-	mov bx,0x0ff10	; int 10.12 bl=10 get EGA info / "install check"
-	mov cx,0x0ffff
-	int 10h
-	cmp cx,0x0ffff	; nothing happened? then no EGA found.
-	pop cx
-	pop bx
-	pop ax
-	stc
-	jz noEga
-isEga:	clc
-noEga:	ret
 
 ; -------------
 
@@ -637,6 +582,7 @@ keywordlist:
 	dw wVgaOn, wxVgaOn, wVgaOff, wxVgaOff
 	dw wSpinUp, spinUpDisks, wSpinDn, spinDownDisks
 	dw wZap, wxZapStats, wAOff, wxACPIOff
+	dw wAInfo, wxACPIInfo	; new 6/2007
 	dw 0,0
 
 wOff	db "APMOFF",0
@@ -675,13 +621,14 @@ wSpinDn	db "SPINDOWN",0
 
 wZap	db "ZAPSTATS",0
 wAOff	db "ACPIOFF",0
+wAInfo	db "ACPIDUMP",0
 
 ; unloadmsg	db "Removal of FDAPM TSR not yet possible.",13,10,"$"
 
 normalstatemsg	db "Back on..."
 		db 13,10,"$"
 
-needvgamsg	db "Requires VGA or newer graphics.",13,10,"$"
+needegamsg	db "Requires EGA or newer graphics.",13,10,"$"
 
 noapminfomsg	db "No APM information - no APM 1.x BIOS?"
 		db 13,10,"$"
@@ -714,30 +661,38 @@ compatINSTmsg	db "No COMSPEC, is this an INSTALL= call?",13,10
 syntaxerrormsg	db "Unkown command - ignored.",13,10,"$"
 
 helpmsg	db "Usage: Give FDAPM any one option from the following list.",13,10
-	db "Case is irrelevant, - or / are not needed. HELP or /? shows this help.",13,10
+	db "Case is irrelevant, - or / are not needed. HELP or /? "
+	db    "shows this help.",13,10
 	db "This is free open source GPL 2 software.",13,10
 	; *** VERSION LINE FOLLOWS ***
-	db "Written and conceived by Eric Auer. Version: 23 May 2005." ; *****
+	db "Written and conceived by Eric Auer. Version: 27 Jun 2007." ; *****
 	db 13,10,13,10
 	db "INFO / STATS - show information about APM status / APMdos",13,10
-	db "APMdos   - keep FDAPM in RAM, save most energy. To stop, select APMbios/APMoff"
+	db "APMdos   - keep FDAPM in RAM, save most energy. "
+	db    "To stop, select APMbios/APMoff"
 	db 13,10
-	db "APMbios / APMoff  - enable / disable plain BIOS APM energy saving mode"
-	db 13,10,13,10
-	db "SPINUP / SPINDOWN - wake up IDE disks / flush caches and stop IDE disks",13,10
-	db "VGAoff / VGAon    - switch VGA DPMS screen off (no auto wake up!) / on"
+	db "APMbios / APMoff  - enable / disable plain BIOS APM "
+	db    "energy saving mode",13,10
 	db 13,10
+	db "SPINUP / SPINDOWN - wake up IDE disks / flush caches and "
+	db    "stop IDE disks",13,10
+	db "VGAoff / VGAon    - turn EGA/VGA/VESA DPMS screen off "
+	db    "(no auto wake up!) / on",13,10
 	db "FLUSH / ZapStats  - flush caches / clear STATS counters",13,10
-	db "SPEEDn   - set system speed to n/8 of max. (0 halts until 'power' pressed).",13,10
+	db "SPEEDn   - set system speed to n/8 of max. (0 halts until "
+	db    "'power' pressed).",13,10
+	db "ACPIDUMP - show ACPI data tables (to debug SPEEDn, stand-by, "
+	db    "power off, etc)",13,10
 	db "STANDBY  - flush caches, enter stand-by mode",13,10
-	db "SUSPEND  - flush caches, stop (will auto wake up) IDE disks, suspend system"
+	db "SUSPEND  - flush caches, stop (will auto wake up) IDE disks, "
+	db    "suspend system",13,10
+	db "POWEROFF - flush caches, stop IDE disks, power off VGA and "
+	db    "system", 13, 10
+	db "PURESUSP / PUREOFF - as SUSPEND / POWEROFF but does not "
+	db    "stop IDE disks first", 13,10
 	db 13,10
-	db "POWEROFF - flush caches, stop IDE disks, power off VGA and system"
-	db 13,10
-	db "PURESUSP / PUREOFF - as SUSPEND / POWEROFF but does not stop IDE disks first"
-	db 13,10,13,10
-	db "COLDboot / WARMboot - do a reboot with / without BIOS tests (POST)"
-	db 13,10
+	db "COLDboot / WARMboot - do a reboot with / without BIOS "
+	db    "tests (POST)",13,10
 	db "HOTboot  - try reboot at once using int 19h (will often crash!)"
 	db 13,10
 	db "$"

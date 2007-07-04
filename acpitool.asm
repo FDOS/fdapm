@@ -1,5 +1,5 @@
 ; ### This file is part of FDAPM, a tool for APM power management and
-; ### energy saving. (c) by Eric Auer <eric #@# coli.uni-sb.de> 2005.
+; ### energy saving. (c) by Eric Auer <eric #@# coli.uni-sb.de> 2005-2007.
 ; FDAPM is free software; you can redistribute it and/or modify it
 ; under the terms of the GNU General Public License as published
 ; by the Free Software Foundation; either version 2 of the License,
@@ -13,12 +13,15 @@
 ; Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
 ; (or try http://www.gnu.org/licenses/ at http://www.gnu.org).
 
-	; ACPI throttle / off functions for FDAPM by Eric Auer 2005
+	; ACPI throttle / off functions for FDAPM by Eric Auer 2005-2007
+	; Updates 2006:  parser & acpitool were the only updated FDAPM parts
+	; Update 1/2007: Support for PM1b ports and better ROM scan
 	; to be placed LAST in FDAPM binary (uses buffers after code)
 
 	; supported functions: THROTTLE - call with AX=0..8 to get
 	; S1 HLT, 1..8/8 speed, and ACPIOFF - call, after flushing
 	; buffers, to soft-off the system (S4/S5 state).
+	; new 6/2007: ACPIDUMP - hexdumps a lot of ACPI data
 
 	; Sn states: 0 on, 1 stopped (press power button to wake up),
 	; (2 CPU off*), 3 suspend to RAM*, 4 suspend to disk*, 5 off*
@@ -48,9 +51,127 @@ failed:	mov ax,4cffh
 
 	; -------------
 
-throttle:			; call with AX=1..8 for 1..8/8 speed
-	push ax			; or with AX=0 for S1 stop or AX=9 to read speed.
-					; returns old speed in AX, destroys registers.
+s1_sys:	; *** S1 ***		; "stop" case: caller should flush caches
+	mov ax,[s1mode]		; etc. before selecting this "speed".
+	cmp al,-1		; check only 1a part
+	jnz s1_okay
+	push ax
+	push dx
+	mov ah,9
+	mov dx,noS1DSDTmsg	; SPEED0 not supported: ACPI S1 code unknown
+	int 21h
+	pop dx
+	pop ax
+s1_okay:
+	jmp sn_sys
+
+c_ret:	stc
+	ret
+
+acpidump:			; ACPIDUMP: Only fetch and print ACPI info
+	mov byte [dumpacpi],1	; activate dump mode
+	call getacpi
+	mov byte [dumpacpi],0	; end dump mode
+	ret			; CY set / clear depends on getacpi status
+
+acpioff: ; *** S5 ***		; Just ACPI soft-off the system
+	call getacpi		; collect ACPI data
+	jc c_ret
+	mov ax,[s5mode]
+	cmp al,-1		; check only 1a part
+	jnz s5_okay
+	push ax
+	push dx
+	mov ah,9
+	mov dx,noS5DSDTmsg	; SPEED0 not supported: ACPI S1 code unknown
+	int 21h
+	pop dx
+	pop ax
+s5_okay:
+	jmp sn_sys		; Enter that mode of no return!
+
+	; -------------
+
+sn_sys:	cmp al,-1		; trigger S1 sleep or S5 soft-off etc.
+	jz c_ret		; selected Sn state not supported
+	;
+	cli
+	push ax
+	mov dx,pm1aSts		; OFFSET of first of two variables
+	call pm_read		; read pm1?Status into AX
+	or ax,8700h		; clear (by writing 1) pending "waking up",
+	mov dx,pm1aSts		; OFFSET of first of two variables
+	call pm_write		; "RTC ring" "sleep button", "power button".
+	mov dx,pm1aEn		; OFFSET of first of two variables
+	call pm_read		; read pm1?Enable
+	or ax,300h		; enable "sleep button" and "power button".
+	mov dx,pm1aEn		; OFFSET of first of two variables
+	call pm_write		; write pm1?Enable
+	pop ax
+	;
+	push ax		; note that SLP_TYP for 1a and 1b can be different!
+	mov ah,0
+	shl ax,10	; 400h * number for 1a SLP_TYP (386 instructions okay)
+	or ax,2000h	; "enter new mode" flag
+	mov dx,[pm1aCnt] ; PM1?Control is NO normal block for SLP_TYP bits...
+	out dx,ax	; Ta-Daa! Write PM1aControl first
+	pop ax
+	xchg al,ah
+	mov ah,0
+	shl ax,10	; 400h * number for 1b SLP_TYP (386 instructions okay)
+	or ax,2000h	; "enter new mode" flag
+	mov dx,[pm1bCnt] ; PM1?Control is NO normal block for SLP_TYP bits...
+	or dx,dx
+	jz no_1b2		; no 1b port, so we are done here
+	out dx,ax		; Ta-Daa! Write PM1bControl second
+no_1b2:
+; *** we are now supposed to read the status registers to get confirmation ***
+	sti
+; -	mov dx,[pblk_io]	; would have to check if latency below 100ys
+; -	add dx,4		; before we may use the p_lvl2 trigger port:
+; -	in al,dx		; reading the port triggers CPU C2 sleep
+	hlt			; HLT triggers CPU C1 sleep
+	clc			; we could read pm1?Status until MSB is set
+just_read_speed:
+	mov ax,bp
+	ret
+
+	; -------------
+
+pm_read:			; read value from group described at DX
+	push si
+	push dx
+	mov si,dx
+	mov dx,[si]		; pm1a
+	in ax,dx		; pm1a
+	mov dx,[si+2]		; pm1b
+	or dx,dx
+	jz no_1b1		; no 1b port, so we are done here
+	push ax			; remember PM1a value
+	in ax,dx		; pm1b
+	pop dx			; was ax: PM1a value
+	or ax,dx		; OR both blocks to get value, see ACPI spec
+no_1b1:	pop dx
+	pop si
+	ret
+
+pm_write:			; write value from AX to group described at DX
+	push si
+	push dx
+	mov si,dx
+	mov dx,[si]		; pm1a
+	out dx,ax		; pm1a...
+	mov dx,[si+2]		; pm1b
+	or dx,dx
+	jz no_1b1		; no 1b port, so we are done here
+	out dx,ax		; pm1b...
+	jmp short no_1b1	; common exit code
+
+	; -------------
+
+throttle:			; THROTTLE: call with AX=1..8 for 1..8/8 speed
+	push ax			; or AX=0 for S1 stop or AX=9 to read speed.
+				; returns old speed in AX, destroys registers.
 	call getacpi		; collect ACPI data
 	pop ax
 	jc c_ret2
@@ -64,40 +185,11 @@ throttle:			; call with AX=1..8 for 1..8/8 speed
 	ja c_ret2		; out of range
 	jz no_tht
 	or ax,ax		; special case: S1 (CPU stop)
-	jnz norm_tht
-s1_sys:	; *** S1 ***		; "stop" case: caller should flush caches
-	mov al,[s1mode]		; etc. before selecting this "speed".
+	jz s1_sys
+	jmp norm_tht
 
-sn_sys:	cmp al,-1		; trigger S1 sleep or S5 soft-off etc.
-	jz c_ret2		; selected Sn state not supported
-	;
-	push ax
-	mov dx,[pm1aEvt]	; base for pm1aStatus and pm1aEnable
-	in ax,dx		; pm1aStatus
-	or ax,8700h		; clear (by writing 1) pending "waking up",
-	out dx,ax		; "RTC ring" "sleep button", "power button".
-	add dx,2		; *** more flexible: "pm1aEvt block len / 2"
-	in ax,dx		; pm1aEnable
-	or ax,300h		; enable "sleep button" and "power button".
-	out dx,ax
-	pop ax
-	;
-	shl ax,10		; 400h * number (CPU will be 386+)
-	or ax,2000h		; "enter new mode" flag
-	mov dx,[pm1aCnt]	; port number for PM 1a control
-	out dx,ax		; Ta-Daa!
-	sti
-; -	mov dx,[pblk_io]	; would have to check if latency below 100ys
-; -	add dx,4		; before we may use the p_lvl2 trigger port:
-; -	in al,dx		; reading the port triggers CPU C2 sleep
-	hlt			; HLT triggers CPU C1 sleep
-	clc			; we could read pm1aStatus until MSB is set
-just_read_speed:
-	mov ax,bp
-	ret
-
-c_ret2:	stc
-	ret
+c_ret2: stc
+        ret
 
 no_tht:	; *** no THROTTLE ***
 	xor ebx,ebx		; to-be-set value
@@ -124,13 +216,13 @@ some_tht:
 	out dx,eax		; Ta-Daa!
 	mov ax,bp		; previous speed
 	clc
-	ret
+go_ret:	ret
 
 norm_tht:			; throttle to 1..7/8 speed
 	movzx eax,al
 	mov cx,[thtbits]	; low: bit offset, high: bit count
 	cmp ch,3
-	jb c_ret		; must be at least 8 steps
+	jc go_ret		; must be at least 8 steps - return CY if less
 	sub ch,3		; if more steps, just use every Nth
 	add cl,ch
 	shl eax,cl
@@ -138,17 +230,12 @@ norm_tht:			; throttle to 1..7/8 speed
 	mov ebx,eax		; to-be-set value
 	jmp short some_tht
 
-c_ret:	stc
-	ret
+	; -------------
 
-acpioff:			; Just ACPI soft-off the system
-	call getacpi		; collect ACPI data
-	jc c_ret
-	mov al,[s5mode]
-	jmp sn_sys		; Enter that mode of no return!
+	; -------------
 
 read_cpu_speed:		; internal (must be called after getacpi) - 5/2005
-	push dx		; returns current CPU throttle value (8 if full speed) in EAX
+	push dx		; returns current CPU throttle (8 = full speed) in EAX
 	push cx		; other registers preserved
 	mov dx,[pblk_io]
 	in eax,dx
@@ -172,6 +259,8 @@ full_read_speed:
 	jmp short done_read_speed
 
 	; -------------
+	; -------------
+	; -------------
 
 getacpi:	; fetch ACPI tables and values (destroys registers)
 	mov ax,[facpptr]	; FACP pointer as "already done" flag
@@ -185,6 +274,12 @@ getacpi:	; fetch ACPI tables and values (destroys registers)
 no_acpi_retry:
 	stc		; we already know that it will not work
 	ret
+	;
+inntdosbox:
+	mov ah,9
+	mov dx,dosboxmsg
+	int 21h		; complain if tried to run in WinNT family DOS box
+	jmp altacpi	; ... and show blatant ad: THROTTLE can do WinNT
 	;
 no_acpi_yet:
 	mov ax,3306h	; get internal DOS version BL:BH.DL/DH (DOS 5+)
@@ -205,7 +300,7 @@ no_acpi_yet:
 	cmp ax,3fch
 	jb noebda
 hasebda:
-	mov cx,1024/16	; scan one kb
+	mov cx,1024/16	; scan only first 1 kb, according to ACPI spec
 	mov ds,ax	; EBDA segment
 	xor bx,bx
 scan_e:	call check_rsdp	; check if DS:BX has RSD PTR structure
@@ -219,7 +314,24 @@ scan_r:	call check_rsdp	; check if DS:BX has RSD PTR structure
 	jz found_rsdp
 	add bx,16
 	cmp bx,0ffe0h
-	jnz scan_r	; check 64k BIOS (COULD do even 128k from e000:0)
+	jnz scan_r	; check 64k BIOS, standard f000:x space
+scan_x:	mov ax,0e000h
+	mov ds,ax
+	xor bx,bx
+	cmp word [ds:bx],0xaa55	; next byte is size in half-kB, but ignored
+	jz scan_y
+	push ds
+	mov ax,cs
+	mov ds,ax
+	mov ah,9
+	mov dx,badromsigmsg	; scan e000:x anyway, but complain
+	int 21h
+	pop ds
+scan_y:	call check_rsdp	; check if DS:BX has RSD PTR structure
+	jz found_rsdp
+	add bx,16
+	cmp bx,0ffe0h
+	jnz scan_y	; check extra 64k BIOS from e000:0
 noacpi:	push cs
 	pop ds
 	mov ah,9
@@ -235,12 +347,6 @@ altacpi:
 	stc		; no ACPI found
 	ret
 
-inntdosbox:
-	mov ah,9
-	mov dx,dosboxmsg
-	int 21h		; complain if tried to run in WinNT family DOS box
-	jmp short altacpi		; ... and show blatant ad
-					; (THROTTLE can do WinNT)
 
 found_rsdp:				; assume 386 present from here on
 	mov eax,[ds:bx+9]		; ignore checksum [8] and copy OEM
@@ -288,14 +394,12 @@ facp_found:
 	xor ax,ax
 	or ax,[thebuffer+32h]		; high word of SMI port
 	or ax,[thebuffer+3ah]		; high word of PM1a event port
-	or ax,[thebuffer+3ch]		; any PM1b event port?
-	or ax,[thebuffer+3eh]		; any PM1b event port?
+	or ax,[thebuffer+3eh]		; high word of PM1b event port
 	or ax,[thebuffer+42h]		; high word of PM1a control reg block
-	or ax,[thebuffer+44h]		; any PM1b control port?
-	or ax,[thebuffer+46h]		; any PM1b control port?
+	or ax,[thebuffer+46h]		; high word of PM1b control port
 	; we ignore: 48 dd PM2 control port, 4c dd PM timer port
 	; 50 dd GPE0 reg block (port base), 54 dd GPE1 ...
-	; ... and block sizes: 58..5d of pm1a/b evt, pm1a/b ctrl,
+	; ... and block sizes: 58..5d of pm1x evt, pm1x ctrl,
 	; pm2 ctrl, pm timer, gpe0, gpe1. 5e is gpe0->1 event number offset
 	;
 	; MAYBE useful: 60 dw C2 latency, 62 dw C3 latency: C2 / C3 above
@@ -314,7 +418,7 @@ facp_found:
 	ret
 
 good_acpi:
-	mov eax,[thebuffer+24h]		; FACS address
+	mov eax,[thebuffer+24h]		; FACS address (not really used yet)
 	mov [facsptr],eax
 	mov eax,[thebuffer+28h]		; DSDT address
 	mov [dsdtptr],eax
@@ -330,28 +434,26 @@ good_acpi:
 	call showax
 	; 36: SMI command for S4BIOS (triggers BIOS assisted S3->S4...)
 %endif
-	mov ax,[thebuffer+38h]		; (high word checked later)
-	mov [pm1aEvt],ax		; PowerMgmt 1a event reg block
+	mov ax,[thebuffer+38h]		; (high word known to be 0)
+	mov [pm1aSts],ax		; PowerMgmt 1a event reg block
+	mov [pm1aEn],ax			; second register in block, fixed later
 	add ax,10h			; normal pm1a_evt -> p_blk offset :-)
 	mov [pblk_io],ax		; THROTTLE port base
-	mov ax,[thebuffer+40h]		; (high word checked later)
+	mov ax,[thebuffer+3ch]		; (high word known to be 0)
+	mov [pm1bSts],ax		; PowerMgmt 1b event reg block
+	mov [pm1bEn],ax			; second register in block, fixed later
+	xor ax,ax
+	mov al,[thebuffer+58h]		; PM1_EVT_SIZE, either 4 or (rarely) 8
+	shr ax,1
+	add [pm1aEn],ax			; fix second register base in block
+	add [pm1bEn],ax			; fix second register base in block
+	;
+	mov ax,[thebuffer+40h]		; (high word known to be 0)
 	mov [pm1aCnt],ax		; PowerMgmt 1a control reg block
+	mov ax,[thebuffer+44h]		; (high word known to be 0)
+	mov [pm1bCnt],ax		; PowerMgmt 1b control reg block
 	mov ax,[thebuffer+68h]
-	cmp ah,3		; duty cycle setting defined?
-	jae tht_okay
-	push ax
-	mov ah,9
-	mov dx,thtwarnmsg
-	int 21h
-	pop ax
-	call showax
-	mov ah,9
-	mov dx,thtwarnmsg2
-	int 21h
-	mov ax,301h	; IGNORE BIOS duty cycle info and use "3 bits, shl 1"!
-tht_okay:
 	mov [thtbits],ax		; low: duty cycle shift value
-tht_ign:
 					; high: duty cycle bit count
 	; 6a/6b/6c: if nonzero, RTC alarm reg numbers for day/month/century
 	; 5f/6d reserved, 6e dd flags: bit 0 "wbinvd supported",
@@ -373,19 +475,61 @@ tht_ign:
 ; --- 	mov [dsdtoem+4],ax
 	call analyze_dsdt		; find Sn state codes for poweroff
 					; ... and allow pblk_io override
-nodsdt:	mov ah,9
+nodsdt:	mov ah,9			; ACPI checks done, display results now
 	mov dx,acpimsg
 	int 21h				; show some names which we found
-	mov ax,[pm1aEvt]	; usually general ACPI port base
+	mov ax,[pm1aSts]	; usually general ACPI port base
 	call showax
 	mov dx,sizeDSDTmsg
 	mov ah,9
 	int 21h
 	mov ax,[dsdtsz]		; yes, we ignore the high 16 bits.
 	call showax		; only low 16 bits displayed... 64 kB max.
-	mov ah,9
-	mov dx,dotcrlfmsg	; add ".",13,10,"$"
+	mov al,'.'
+	call showtty
+	call crlf
+	;
+	mov ah,9		; second line of more verbose ACPI info
+	mov dx,facpmsg
 	int 21h
+	mov ax,[facpptr+2]
+	call showax
+	mov ax,[facpptr]
+	call showaxFull
+	mov ah,9
+	mov dx,dsdtmsg
+	int 21h
+	mov ax,[dsdtptr+2]
+	call showax
+	mov ax,[dsdtptr]
+	call showaxFull
+	mov ah,9
+	mov dx,facsmsg
+	int 21h
+	mov ax,[facsptr+2]
+	call showax
+	mov ax,[facsptr]
+	call showaxFull
+	mov ah,9
+	mov dx,pmctrlmsg
+	int 21h
+	mov ax,[pm1aCnt]
+	call showax
+	mov al,'/'
+	call showtty
+	mov ax,[pm1bCnt]
+	call showax
+	mov ah,9
+	mov dx,pmstatmsg
+	int 21h
+	mov ax,[pm1aSts]
+	call showax
+	mov al,'/'
+	call showtty
+	mov ax,[pm1bSts]
+	call showax
+	call crlf
+	;
 	clc				; everything okay
 	ret
 
@@ -426,20 +570,45 @@ small_dsdt:
 	mov al,'1'
 	mov di,s1mode
 	push cx
-	call find_Sn			; scan for \_S1_ (standby) and store s1mode
+	call find_Sn			; find \_S1_ (standby), store s1mode
 	pop cx	; *** now scan for \_S3_ (suspend to RAM) if no _S1_??? ***
 	mov al,'5'
 	mov di,s5mode
 	push cx
-	call find_Sn			; scan for \_S5_ (power off) and store s5mode
+	call find_Sn			; find \_S5_ (power off), store s5mode
 	pop cx
-	mov di,pblk_io
-	call find_pblk	; scan for ProcessorOp(s)...
+	mov di,pblk_io			; fetch cpu control port base
+	call find_pblk			; scan for ProcessorOp(s)...
 	;
-	mov al,[s5mode]			; mode found? (needed for ACPIOFF)
-	or al,[s1mode]			; mode found? (S1 mode only needed for SPEED0)
-	cmp al,-1			; if not both found, AL is -1
-	jnz s1s5_found
+	mov ax,[thtbits]		; those are not from the pblk, though
+	cmp ah,3		; duty cycle setting defined?
+	jae tht_okay
+	or ax,ax
+	jnz tht_wrong		; unexpected but nonzero throttle definition
+	mov ah,9
+	mov dx,thtwarn0msg	; "BIOS said throttling is not supported"
+	int 21h
+	jmp short tht_override
+tht_wrong:
+	push ax
+	mov ah,9
+	mov dx,thtwarnmsg
+	int 21h
+	pop ax
+	call showax
+	mov ah,9
+	mov dx,thtwarnmsg2
+	int 21h
+tht_override:
+	mov ax,301h	; IGNORE BIOS duty cycle info and use "3 bits, shl 1"!
+tht_okay:
+	mov [thtbits],ax		; low: duty cycle shift value
+	;
+	mov al,[s5mode]			; found S5/1a? (needed for ACPIOFF)
+	and al,[s1mode]			; found S1/1a? (needed for SPEED0)
+	cmp al,-1			; if NEITHER found, value is -1 now
+	jnz s1s5_found			; found at least one of the codes
+	;
 	mov ax,[dsdtsz]		; ignoring high part - max 64k supported.
 	mov dx,noSnDSDTmsg
 	mov ah,9
@@ -452,12 +621,24 @@ small_dsdt:
 	ret			; work, but acpioff and throttle/0 will fail.
 
 s1s5_found:
-	mov al,[s1mode]
+	mov al,[s1mode]		; 1a
+	cmp al,-1
+	jz s1_notfound
 	add al,'0'
 	mov [s1msg],al
-	mov al,[s5mode]
+	mov al,[s1mode+1]	; 1b
+	add al,'0'
+	mov [s1msg+2],al
+s1_notfound:
+	mov al,[s5mode]		; 1a
+	cmp al,-1
+	jz s5_notfound
 	add al,'0'
 	mov [s5msg],al
+	mov al,[s5mode+1]	; 1b
+	add al,'0'
+	mov [s5msg+2],al
+s5_notfound:
 	mov ah,9
 	mov dx,s1s5msg
 	int 21h
@@ -466,30 +647,22 @@ s1s5_found:
 
 	; -------------
 
-find_Sn:				; find \_S?_ in CX size thebuffer
-	; with ? being AL from user. Store first byte item to var at DI...
+find_Sn:	; find _S?_ (\_S?_ before 8/2006) in CX size thebuffer
+	; with ? being AL from user. Store first 2 byte items to var at DI...
 	; _Sn info block: (if size were > 3F, it would use n-byte encoding)
 	; 08 (DefName) "\_Sn_" 12 (PackageOp) nn (size) 02 (item count)
 	; ITEM ITEM, where ITEM can be: 0, 1, -1 constants or 0A xx for
 	; "byte xx" (0B xxxx / 0C xxxxxxxx would be word/dword...)
+	; Norbert Remmel has a DSDT which omits the \ before the _Sn_ :-p
 	push cx
 	push si
 	push eax
 	mov si,thebuffer+24h	; base (header skipped)
 	sub cx,24h+10		; consider header and target size
 	jc no_Sn
-%if 0		; already checking in fetch_high anyway
-	push si		; rough check for buffer overflow...
-	add si,1024		; desired left-over stack size
-	sub si,sp		; add (64k-sp), already in-use stack size
-	add si,cx		; buffer size
-	pop si
-	jc no_Sn		; buffer would overflow stack
-%endif
-	shl ax,8
-	mov al,'S'	; "Sn" now
+	mov ah,'_'		; al is the '?' variable from the caller
 	shl eax,16
-	mov ax,'\_'	; EAX is "\_Sn" now
+	mov ax,'_S'		; EAX is "_Sn_" now
 scan_S:	cmp [si],eax
 	jz maybe_Sn
 half_Sn:
@@ -497,15 +670,13 @@ half_Sn:
 	loop scan_S
 	jmp short no_Sn
 maybe_Sn:
-	cmp word [si+4],'_'+1200h	; Package at \_Sn_?
+	cmp byte [si+4],12h	; datatype Package at _Sn_?
 	jnz half_Sn	; looked good, but was not the real thing
-	cmp byte [si+6],3fh
+	cmp byte [si+5],3fh
 	ja half_Sn	; that is implausibly big
-;	cmp byte [si+7],2
-;	jnz half_Sn	; _Sn should always contain 2 items
-		; (items are PM1a and PM1b state codes)
-	mov ax,[si+8]	; first 2 bytes should be enough
-		; (we only want to know the PM1a state code)
+;	cmp byte [si+6],...	; contains 2 items normally, 4 for dual CPU?
+			; first 2 items are PM1a and PM1b state codes, resp.
+	mov ax,[si+7]	; 2 bytes are enough to get 1 byte item: PM1a SLP_TYP
 	or al,al	; "zero"?
 	jz got_Sn
 	cmp al,1	; "one"?
@@ -515,28 +686,127 @@ maybe_Sn:
 	cmp al,0ah	; "byte constant"?
 	jnz no_Sn	; we cannot parse other variants
 	mov al,ah	; constant is in next byte
+	inc si		; next byte item is 1 byte later in this case...!
 	jmp short got_Sn
 got_Sn_min1:
-	mov al,7	; Sn values must be 3 bit values
-got_Sn:	mov [di],al	; YES, we found a value!
-no_Sn:
+	mov al,7	; Sn values must be 3 bit values, so -1 is 7 here
+got_Sn:	mov [di],al	; YES, we found a value for PM1a SLP_TYP
+	mov ax,[si+8]	; 2 bytes are enough to get 1 byte item: PM1b SLP_TYP
+	or al,al	; "zero"?
+	jz got2Sn
+	cmp al,1	; "one"?
+	jz got2Sn
+	cmp al,-1	; "minus one"?
+	jz got2Sn_min1
+	cmp al,0ah	; "byte constant"?
+	jnz no_Sn	; we cannot parse other variants
+	mov al,ah	; constant is in next byte
+;	inc si		; next byte item is 1 byte later in this case
+	jmp short got2Sn
+got2Sn_min1:
+	mov al,7	; Sn values must be 3 bit values, so -1 is 7 here
+got2Sn:	mov [di+1],al	; YES, we found a value for PM1b SLP_TYP
+no_Sn:			; common exit code
 	pop eax
 	pop si
 	pop cx
 	ret
 
-find_pblk:				; find \_PR_ in CX size thebuffer
-	; and store Processor p_blk to word at DI if not 0
-	; *** TODO: pblk_io override based on parsing _PR_ information ***
-	; Processor block info, size by1, P_BLK at dd, size by2 (0 or 4..6) ->
-	; "\_PR_" 5B (prefix) 83 (ProcessorOp) by1 "\._PR_CPU0" 01 dd by2
-	; *** TODO *** TODO *** TODO ***
-	ret
+	; -------------
+
+find_pblk:			; find \_PR_ in CX size thebuffer and store
+	; the Processor p_blk base to word at DI if it is in 1-ffff range...
+	push cx
+	push si
+	push eax
+	mov si,thebuffer+24h	; base (header skipped)
+	sub cx,24h+20		; consider header and target size
+	jc no_Sn		; just use the same exit code
+	; Processor block info, size 0b, pblk at 8010, 6 ports (0, 4 or 6)
+	; "\_PR_" 5b(prefix) 83(processor)
+	; [0b "CPU0"-0 10-80-00-00(base) 6(size)]
+	mov eax,'\_PR'
+scan_p:	cmp [si],eax
+	jz maybe_p
+half_p:
+	inc si
+	loop scan_p
+	jmp short no_Sn		; just use the same exit code
+maybe_p:
+	cmp byte [si+4],'_'
+	jnz half_p
+	cmp word [si+5],835bh
+	jnz half_p
+	cmp byte [si+7],11	; our parser is limited, so we use fixed size
+	jz parse_p
+	cmp byte [si+7],11+6	; well at least we support TWO sizes
+	jnz unparse_p		; end of our flexibility
+	cmp word [si+8],'\.'	; two part name: "\._PR_CPU0" for example
+	jnz unparse_p
+	add si,4	; an evil skip over the 4 bytes after "\."
+parse_p:
+	cmp byte [si+7+10],4
+	jb no_p			; zero size pblk is as good as no pblk
+	cmp byte [si+7+10],6	; pblk must be 4-6 ports big
+	ja unparse_p
+	mov eax,[si+7+1]	; CPU "name"
+	mov [pblk_cpu],eax	; patch into message
+	; we ignore the CPU "number" at [si+7+5]
+	cmp word [si+7+6+2],0	; high word of port address
+	jnz unparse_p
+	mov ax,[si+7+6]		; low word of port address
+	or ax,ax
+	jz no_p			; zero pblk port is as good as no pblk port
+	mov [di],ax		; we got a value!
+	push dx
+	mov ah,9		; show message
+	mov dx,pblk_msg		; report processor data
+	int 21h
+	mov ax,[di]		; fetch port again
+	call showax
+	call crlf
+	pop dx
+	cmp word [si+7+11],835bh	; another processor block?
+	jnz no_p
+	push dx
+	mov dx,pblk_2nd		; mention 2nd processor block
+msg_p:	mov ah,9		; show message
+	int 21h
+	pop dx
+no_p:	jmp no_Sn		; recycle the common exit code
+
+unparse_p:
+	push dx
+	mov dx,pblk_odd		; warn about odd pblk contents
+	jmp short msg_p
+
+	; from Norbert's DSDT, the first with a nonzero PBLK that I met:
+	; 0000000: 4453 4454 c647 0000 0139 4655 4a5f 5f5f  DSDT.G...9FUJ___
+	; 0000010: 4546 355f 5f5f 5f5f 0000 0406 4d53 4654  EF5_____....MSFT
+	; 0000020: 0e00 0001 1020_5c5f 5052 5f_5b 830b 4350  ..... \_PR_[..CP
+	; 0000030: 5530 0010 8000 0006_5b83 0b43 5055 3101  U0......[..CPU1.
+	; 0000040: 1080 0000 0608 5f53 305f 120a 040a 000a  ......_S0_......
+	; 0000050: 000a 000a 0008 5f53 335f 120a 040a 030a  ......_S3_......
+	; 0000060: 030a 000a 0008 5f53 345f 120a 040a 040a  ......_S4_......
+	; 0000070: 040a 000a 0008 5f53 355f 120a 040a 050a  ......_S5_......
+	; 0000080: 050a 000a 005b 805c 4445 4247 010b 8010  .....[.\DEBG....
+	;
+	; The IASL output for that:
+	;  DefinitionBlock ("DSDT.aml", "DSDT", 1, 
+	;      "FUJ___", "EF5_____", 0x06040000) {
+	;    Scope (\_PR) { Processor (CPU0, 0x00, 0x00008010, 0x06) {}
+	;      Processor (CPU1, 0x01, 0x00008010, 0x06) {} }
+	;    Name (_S0, Package (0x04) { 0x00, 0x00, 0x00, 0x00 })
+	;    Name (_S3, Package (0x04) { 0x03, 0x03, 0x00, 0x00 })
+	;    Name (_S4, Package (0x04) { 0x04, 0x04, 0x00, 0x00 })
+	;    Name (_S5, Package (0x04) { 0x05, 0x05, 0x00, 0x00 })
+	;    OperationRegion (\DEBG, SystemIO, 0x1080, 0x01) ... ... ... }
+	; Processor: namestring, idbyte, dword adress, byte length (0 or 6)
 
 	; -------------
 
 fetch_high:				; copy ??? bytes from EAX to thebuffer
-	push eax			; ??? value is taken from copied data [4]
+	push eax			; ??? is taken from copied_data[4]
 	mov [gdt_src+2],ax		; low part
 	shr eax,16
 	mov [gdt_src+4],al		; mid part
@@ -560,7 +830,7 @@ fetch_high:				; copy ??? bytes from EAX to thebuffer
 	mov si,gdt			; structure offset (in ES)
 	mov ah,87h			; high memory copy
 	int 15h				; misc BIOS services
-	jc failed_fetch
+	jc toobig_fetch	; chains to failed_fetch
 	;
 	mov cx,[thebuffer+4]	; read table size from header
 	inc cx	; SECOND step: we fetch ALL the data (round up to words)
@@ -587,6 +857,42 @@ acceptable_fetch:
 	mov si,gdt			; structure offset (in ES)
 	mov ah,87h			; high memory copy
 	int 15h				; misc BIOS services
+	jc failed_fetch
+
+okay_fetch:
+	test byte [dumpacpi],1	; dump mode active?
+	jz dump_done
+	mov eax,[thebuffer]	; start dump: show initial tag string
+dump_tag:
+	call showtty
+	shr eax,8
+	or al,al
+	jnz dump_tag
+				; dump incl tag and size bytes follows
+	mov cx,[thebuffer+4]	; size (we ignore the upper 16 bits)
+	mov si,thebuffer	; offset
+dump_fetch:			; hexdump the whole fetched data
+	mov ax,si
+	sub ax,thebuffer	; offset
+	test al,15		; multiple of 16?
+	jnz dump_mid
+	call crlf		; if yes, show CR, LF, address
+	call showaxFull		; the address
+	mov al,':'
+	call showtty
+	mov al,' '
+	call showtty
+dump_mid:
+	mov al,[si]
+	call showalFull		; a data byte
+	mov al,' '
+	call showtty
+	inc si
+	loop dump_fetch
+	call crlf		; add CR LF at the end
+dump_done:
+	clc
+
 failed_fetch:
 	pop si
 	pop cx
@@ -604,24 +910,29 @@ smi_irq	dw 0				; not yet used
 smi_io	dw 0				; not yet used
 smi_flg	dw 0				; not yet used
 %endif
-pm1aEvt	dw 0				; PowerMgmt 1a event port base
-	; contains 2 words (or dwords, if block size is 8 bytes, rare!)
-	; 1. "status" 2. "enable"
+	; NOTE: 1b variable must be stored right after 1a one for each base!
+pm1aSts	dw 0				; PowerMgmt 1a event port base: status
+pm1bSts dw 0				; PowerMgmt 1b event port base: status
+pm1aEn	dw 0				; second register: enable
+pm1bEn	dw 0				; second register: enable
 pm1aCnt	dw 0	; for S1/S5...		; PowerMgmt 1a control port base
+pm1bCnt	dw 0	; for S1/S5...		; PowerMgmt 1b control port base
 thtbits	dw 301h	; for throttle		; CPU duty cycle: low offs, high size
-pblk_io	dw 0	; for throttle		; CPU port base (default pm1aEvt+10)
+pblk_io	dw 0	; for throttle		; CPU port base, default pm1aSts + 10h
 
 	; *** useful constants taken from DSDT ***
-dsdtsz	dd 0	; size of DSDT (used for "too big" message)
+dsdtsz	dd 0	; size of DSDT (used for "too big" message and status message)
 	; s0mode is not used, as wake-from-S1 should mean S0 anyway
-s1mode	db -1	; pm1aCnt mode number for S1 sleep - you SHOULD first
-	; put all PCI/AGP devices to sleep, too, as far as supported.
+s1mode	db -1,-1	; pm1aCnt, pm1bCnt mode number for S1 sleep - SHOULD
+	; first put all PCI/AGP devices to sleep, too, as far as supported.
 	; s2mode is optional, s3mode is only used if s3 differs from
 	; "suspend to RAM by shutting down all devices and go to S1"
 	; s4mode is often equal to S4 (suspend to disk) mode...
-s5mode	db -1	; pm1aCnt mode number for S5 soft-off
+s5mode	db -1,-1	; pm1aCnt, pm1bCnt mode number for S5 soft-off
 	; (at least one of S1...S5 must be possible)
 	; DSDT can also override pblk_io
+
+	; -------------
 
 acpimsg		db "ACPI for '"
 rsdoem		db "??????' found: "
@@ -629,26 +940,50 @@ rsdmodel	db "????????"	; --- (DSDT for '"
 ; --- dsdtoem		db "??????'), port base $"
 		db ", port base 0x$"
 sizeDSDTmsg	db ", DSDT size 0x$"
-dotcrlfmsg	db "."
-crlfmsg		db 13,10,"$"
+
+dsdtmsg		db " DSDT@$"
+facpmsg		db " FACP@$"
+facsmsg		db " FACS@$"
+pmctrlmsg	db " control@$"
+pmstatmsg	db " status@$"
 
 s1s5msg		db "ACPI mode codes from DSDT: S1 (sleep) is "
-s1msg		db "?, S5 (soft-off) is "
-s5msg		db "?.",13,10,"$"
+s1msg		db "-/-, S5 (soft-off) is "
+s5msg		db "-/-.",13,10,"$"
 
-dosboxmsg	db "True DOS version 5.50 - WinNT/2k/XP DOS box: No ACPI."
+dosboxmsg	db "WinNT/2k/XP 'DOS 5.50' box: No ACPI."
 		db 13,10,"$"
 
-noSnDSDTmsg	db "ACPI S1 / S5 info not in DSDT, check BIOS CMOS setup."
-		db 13,10,"$"
-badacpimsg	db "I/O base must be 16bit, no PM1b.",13,10,"$"
-thtwarnmsg	db "WARNING: BIOS throttle info '$"
+noS5DSDTmsg	db "ACPI S5 poweroff code not in DSDT, cannot use ACPIOFF."
+		db " Check BIOS CMOS setup?",13,10,"$"
+noS1DSDTmsg	db "ACPI S1 sleep code not in DSDT, cannot use ACPI freeze."
+		db " Check BIOS setup?",13,10,"$"
+noSnDSDTmsg	db "ACPI S1 sleep and S5 poweroff both not defined in DSDT."
+		db 13,10,"Check BIOS setup?",13,10,"$"
+
+thtwarnmsg	db "BIOS throttle info '$"
 thtwarnmsg2	db "' rejected, SPEEDn will use '301' instead.",13,10,"$"
+thtwarn0msg	db "BIOS said we cannot throttle - will try anyway ;-)"
+		db 13,10,"$"
+
+badacpimsg	db "I/O bases must all be 16bit",13,10,"$"
+badromsigmsg	db "No ROM signature found at E000, scanning 64k anyway..."
+		db 13,10,"$"
 noacpimsg	db "No ACPI (?) - check BIOS CMOS setup.",13,10,"$"
+
 contactmsg	db "Try PCISLEEP or try www.oldskool.org/pc/throttle/"
 		db " by Jeff Leyda,",13,10
 		db "or contact: eric at coli.uni-sb.de",13,10,"$"
 
+pblk_msg	db "Found processor block for "
+pblk_cpu	db "CPU0, port base: 0x$" ; add AX and crlf after this
+pblk_2nd	db "Processor block for other CPU(s) ignored",13,10,"$"
+pblk_odd	db "Cannot parse ACPI processor block, please report!"
+		db 13,10,"$"
+
+dumpacpi	db 0	; set to 1 to hexdump all acpi related data
+
+	; -------------
 
 	align 8
 gdt:	dw 0, 0, 0, 0			; NULL descriptor

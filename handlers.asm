@@ -19,6 +19,7 @@
 ; Main configuration variables are in main file:
 ; dw apmversion, db savingstrat, dw MainStatus,
 ; db IdleStrategy, dw IdleHardness, dw APMPollFreq.
+; New 6/2007: maxSavingstrat.
 
 ; idlestrategy bits 0..3: IDLE16*, IDLE28, IDLE2F*, IDLE2A
 ; idle stat buf order: 2f*, 28, 16*, 2a
@@ -196,7 +197,7 @@ useMainStatus:	; update settings to reach OFF, REG or ADV mode
 			; or al,ah is probably too simplistic, so...
 	cmp ah,3	; only in ADV mode use int hooks!?
 	jnz noMainADV
-	or al,3		; enable both HLT and APM IDLE
+	or al,[cs:maxSavingstrat]	; enable HLT and/or APM IDLE
 		; (idling will ignore APM IDLE if no APM available)
 noMainADV:
 	mov [cs:savingstrat],al

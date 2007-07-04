@@ -1,5 +1,5 @@
 ; ### This file is part of FDAPM, a tool for APM power management and
-; ### energy saving. (c) by Eric Auer <eric #@# coli.uni-sb.de> 2003.
+; ### energy saving. (c) by Eric Auer <eric #@# coli.uni-sb.de> 2003-2007.
 ; FDAPM is free software; you can redistribute it and/or modify it
 ; under the terms of the GNU General Public License as published
 ; by the Free Software Foundation; either version 2 of the License,
@@ -15,6 +15,7 @@
 
 ; This file: statusPOWER (destroys registers)
 ; Writes POWER TSR status to stdout, or just tells if no TSR found.
+; Change in 2007: Just edited sources to fit into 80 columns :-)
 
 foundmsg	db "Found resident FDAPM / POWER driver version $"
 nfoundmsg	db "No FDAPM / POWER driver resident yet.",13,10,"$"
@@ -147,7 +148,7 @@ iPercScale2:		; SCALE values until CX and DX are both 0
 	jmp short iPercScale
 iPercOkay:		; scaled to 16 bit values: AX of BX units idle
 	cmp bx,ax		; more idle time than uptime?
-	jb iPercInfinite		; show "100%" instead of impossible value
+	jb iPercInfinite	; show "100%" instead of impossible value
 	mov cx,100		; turn into %
 	mul cx			; scaled idleTicks * 100 -> dx:ax
 ; ---	cmp bx,100		; would division overflow?

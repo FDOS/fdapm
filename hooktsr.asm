@@ -1,5 +1,5 @@
 ; ### This file is part of FDAPM, a tool for APM power management and
-; ### energy saving. (c) by Eric Auer <eric #@# coli.uni-sb.de> 2003.
+; ### energy saving. (c) by Eric Auer <eric #@# coli.uni-sb.de> 2003-2007.
 ; FDAPM is free software; you can redistribute it and/or modify it
 ; under the terms of the GNU General Public License as published
 ; by the Free Software Foundation; either version 2 of the License,
@@ -42,10 +42,42 @@ goingTSR:
 	mov ax,40h
 	mov ds,ax
 	mov ax,[ds:6ch]		; low word of timer tick
+	pop ds
 	mov [cs:lastIdleTick],ax	; avoid duplicate counts
 	mov [cs:lastOnTick],ax		; not checked every tick
 	mov byte [cs:onTicks],1	; make sure that this dd is not 0
-	pop ds
+
+	call findVga		; no VESA if not at least VGA
+	jc noBochs
+	push es
+	mov di,cs
+	mov es,di
+	mov di,acpistuff	; offset: we can overwrite all ACPI stuff
+	add di,4
+	and di,0xfffc		; 512 byte buffer at es:di
+	mov word [es:di],'V'+(0x100*'B')
+	mov word [es:di+2],'E'+(0x100*'2')
+	mov ax,0x4f00		; test for VESA
+	int 0x10
+	pop es
+	cmp ax,0x4f		; okay?
+	jnz noBochs
+	push es
+	les di,[cs:di+0x06]	; OEM name string pointer
+	mov ax,[es:di+2]
+	cmp word [es:di],'B'+(0x100*'o')
+	pop es
+	jnz noBochs
+	cmp ax,'c'+(0x100*'h')
+	jnz noBochs
+isBochs:
+	mov ah,9
+	mov dx,bochsmsg
+	int 0x21	; show warning string
+	and byte [cs:savingstrat],0xfd	; "and not 2", disable APM idling
+	and byte [cs:maxSavingstrat],0xfd	; disallow APM idling
+noBochs:
+
 	push es
 	mov es,[cs:2ch]	; environment segment
 			; see Ralf Browns IntList tables 1378-1379
@@ -108,3 +140,5 @@ hooktable:
 %endif
 	db 0
 
+bochsmsg	db "Bochs VESA VBE OEM name found, disabling BIOS APM CPU idle calls"
+		db 13,10,"$"	; avoid Bochs 2.3 "panic on HLT in BIOS"
